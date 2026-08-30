@@ -1,0 +1,111 @@
+{
+  "categories": [
+    {
+      "name": "Transport",
+      "subcategories": [
+        "Cab",
+        "Auto",
+        "Bus",
+        "Train",
+        "Flight",
+        "Bike/Car Fuel",
+        "Parking",
+        "Tolls"
+      ]
+    },
+    {
+      "name": "Groceries",
+      "subcategories": [
+        "Vegetables",
+        "Fruits",
+        "Dairy",
+        "Meat",
+        "Grains",
+        "Spices",
+        "Beverages",
+        "Snacks"
+      ]
+    },
+    {
+      "name": "Food & Dining",
+      "subcategories": [
+        "Restaurant",
+        "Cafe",
+        "Fast Food",
+        "Delivery",
+        "Street Food",
+        "Lunch"
+      ]
+    },
+    {
+      "name": "Entertainment",
+      "subcategories": [
+        "Movies",
+        "Gaming",
+        "Music",
+        "Books",
+        "Events",
+        "Streaming Services"
+      ]
+    },
+    {
+      "name": "Utilities",
+      "subcategories": [
+        "Electricity",
+        "Water",
+        "Internet",
+        "Mobile Bill",
+        "Gas"
+      ]
+    },
+    {
+      "name": "Shopping",
+      "subcategories": [
+        "Clothes",
+        "Electronics",
+        "Home",
+        "Personal Care",
+        "Accessories",
+        "Shoes"
+      ]
+    },
+    {
+      "name": "Health & Medical",
+      "subcategories": [
+        "Doctor",
+        "Medicine",
+        "Dental",
+        "Gym",
+        "Medical Tests",
+        "Hospital"
+      ]
+    },
+    {
+      "name": "Education",
+      "subcategories": [
+        "Tuition",
+        "Books",
+        "Courses",
+        "Coaching",
+        "Exam Fees"
+      ]
+    },
+    {
+      "name": "Rent & Housing",
+      "subcategories": [
+        "Rent",
+        "Maintenance",
+        "Repairs",
+        "Cleaning",
+        "Property Tax"
+      ]
+    },
+    {
+      "name": "General",
+      "subcategories": [
+        "Miscellaneous",
+        "Other"
+      ]
+    }
+  ]
+}
