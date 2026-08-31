@@ -121,9 +121,10 @@ async def get_connection():
         logger.info(f"[DB CONNECTION] Directory exists: {os.path.exists(db_dir)}")
         logger.info(f"[DB CONNECTION] Directory writable: {os.access(db_dir, os.W_OK) if os.path.exists(db_dir) else 'N/A'}")
 
-        # Ensure directory exists
-        os.makedirs(db_dir, exist_ok=True)
+        # Ensure directory exists with proper permissions
+        os.makedirs(db_dir, exist_ok=True, mode=0o777)
         logger.info(f"[DB CONNECTION] Directory ensured to exist: {os.path.exists(db_dir)}")
+        logger.info(f"[DB CONNECTION] Directory writable after mkdir: {os.access(db_dir, os.W_OK)}")
 
         # Try to connect
         logger.info(f"[DB CONNECTION] Calling aiosqlite.connect()...")
@@ -132,7 +133,23 @@ async def get_connection():
         await conn.execute("PRAGMA journal_mode=WAL")
         conn.row_factory = aiosqlite.Row
 
-        logger.info(f"[DB CONNECTION] Successfully connected!")
+        # Ensure tables exist (in case init_db didn't run)
+        logger.info(f"[DB CONNECTION] Ensuring tables exist...")
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS expenses (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                description TEXT NOT NULL,
+                amount REAL NOT NULL,
+                category TEXT NOT NULL,
+                subcategory TEXT,
+                expense_date TEXT DEFAULT CURRENT_DATE,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT
+            )
+        """)
+        await conn.commit()
+
+        logger.info(f"[DB CONNECTION] Successfully connected and tables ready!")
         return conn
     except FileNotFoundError as e:
         logger.error(f"[DB CONNECTION] FileNotFoundError: {e}")
