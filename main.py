@@ -88,16 +88,37 @@ async def get_connection():
     """Get an async database connection."""
     try:
         db_dir = str(Path(DB_PATH).parent)
-        os.makedirs(db_dir, exist_ok=True)
 
-        logger.debug(f"Connecting to database: {DB_PATH}")
+        # Detailed logging for debugging
+        logger.info(f"[DB CONNECTION] Attempting to connect to: {DB_PATH}")
+        logger.info(f"[DB CONNECTION] Database directory: {db_dir}")
+        logger.info(f"[DB CONNECTION] Directory exists: {os.path.exists(db_dir)}")
+        logger.info(f"[DB CONNECTION] Directory writable: {os.access(db_dir, os.W_OK) if os.path.exists(db_dir) else 'N/A'}")
+
+        # Ensure directory exists
+        os.makedirs(db_dir, exist_ok=True)
+        logger.info(f"[DB CONNECTION] Directory ensured to exist: {os.path.exists(db_dir)}")
+
+        # Try to connect
+        logger.info(f"[DB CONNECTION] Calling aiosqlite.connect()...")
         conn = await aiosqlite.connect(DB_PATH)
+
         await conn.execute("PRAGMA journal_mode=WAL")
         conn.row_factory = aiosqlite.Row
-        logger.debug(f"Successfully connected to database")
+
+        logger.info(f"[DB CONNECTION] Successfully connected!")
         return conn
+    except FileNotFoundError as e:
+        logger.error(f"[DB CONNECTION] FileNotFoundError: {e}")
+        logger.error(f"[DB CONNECTION] DB_PATH={DB_PATH}")
+        logger.error(f"[DB CONNECTION] DB_PATH parent={Path(DB_PATH).parent}")
+        logger.error(f"[DB CONNECTION] __file__={__file__}")
+        logger.error(f"[DB CONNECTION] cwd={os.getcwd()}")
+        raise
     except Exception as e:
-        logger.error(f"Failed to connect to database at {DB_PATH}: {e}")
+        logger.error(f"[DB CONNECTION] Exception: {type(e).__name__}: {e}")
+        logger.error(f"[DB CONNECTION] DB_PATH={DB_PATH}")
+        logger.error(f"[DB CONNECTION] cwd={os.getcwd()}")
         raise
 
 
@@ -184,11 +205,18 @@ def get_month_bounds(month: str = None) -> tuple[str, str]:
 async def init_db():
     """Initialize the SQLite database with all tables (non-destructive)."""
     try:
-        logger.info(f"Initializing database at: {DB_PATH}")
+        logger.info(f"[INIT_DB] Starting database initialization...")
+        logger.info(f"[INIT_DB] DB_PATH: {DB_PATH}")
+        logger.info(f"[INIT_DB] __file__: {__file__}")
+        logger.info(f"[INIT_DB] cwd: {os.getcwd()}")
 
         db_dir = str(Path(DB_PATH).parent)
+        logger.info(f"[INIT_DB] Database directory: {db_dir}")
+        logger.info(f"[INIT_DB] Directory exists before mkdir: {os.path.exists(db_dir)}")
+
         os.makedirs(db_dir, exist_ok=True)
-        logger.info(f"Database directory: {db_dir}")
+        logger.info(f"[INIT_DB] Directory exists after mkdir: {os.path.exists(db_dir)}")
+        logger.info(f"[INIT_DB] Directory writable: {os.access(db_dir, os.W_OK)}")
 
         conn = await aiosqlite.connect(DB_PATH)
 
