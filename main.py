@@ -26,8 +26,10 @@ mcp = FastMCP(name="Expense Tracker")
 
 # Store database in the same folder as main.py
 SCRIPT_DIR = Path(__file__).parent
-DB_PATH = SCRIPT_DIR / "expenses.db"
-CATEGORIES_FILE = SCRIPT_DIR / "categories.json"
+# CATEGORIES_FILE = SCRIPT_DIR / "categories.json"
+# DB_PATH = SCRIPT_DIR / "expenses.db"
+DB_PATH = os.path.join(os.path.dirname(__file__),"expenses.db")
+CATEGORIES_FILE = os.path.join(os.path.dirname(__file__),"categories.json")
 EXPORTS_DIR = SCRIPT_DIR / "exports"
 RECENT_EXPENSES_LIMIT = 10
 
@@ -87,9 +89,9 @@ def get_connection():
     return conn
 
 
-def _validate_category(category: str, subcategory: str = None) -> tuple[bool, dict]:
+def _validate_category(category: str, subcategory: str = None) -> tuple[bool, dict, str | None]:
     """Validate category and subcategory against loaded categories.
-    Returns (is_valid, error_dict_if_invalid)"""
+    Returns (is_valid, error_dict_if_invalid, normalized_subcategory)"""
     valid_categories = {cat["name"] for cat in CATEGORIES}
 
     if category not in valid_categories:
@@ -97,18 +99,27 @@ def _validate_category(category: str, subcategory: str = None) -> tuple[bool, di
             "success": False,
             "message": f"Invalid category: {category}",
             "available_categories": list(valid_categories)
-        }
+        }, None
 
+    normalized_sub = subcategory
     if subcategory:
         cat_obj = next((cat for cat in CATEGORIES if cat["name"] == category), None)
-        if cat_obj and subcategory not in cat_obj["subcategories"]:
-            return False, {
-                "success": False,
-                "message": f"Invalid subcategory: {subcategory} for category: {category}",
-                "available_subcategories": cat_obj["subcategories"]
-            }
+        if cat_obj:
+            # Find matching subcategory (case-insensitive)
+            matching_sub = next(
+                (sub for sub in cat_obj["subcategories"] if sub.lower() == subcategory.lower()),
+                None
+            )
+            if matching_sub:
+                normalized_sub = matching_sub
+            else:
+                return False, {
+                    "success": False,
+                    "message": f"Invalid subcategory: {subcategory} for category: {category}",
+                    "available_subcategories": cat_obj["subcategories"]
+                }, None
 
-    return True, {}
+    return True, {}, normalized_sub
 
 
 def _suggest_category(description: str) -> tuple[str, str] | None:
@@ -248,7 +259,7 @@ def add_expense(description: str, amount: float, category: str, subcategory: str
         logger.info(f"add_expense called: desc={description}, amount={amount}, category={category}, subcategory={subcategory}")
 
         # Validate category
-        is_valid, error_dict = _validate_category(category, subcategory)
+        is_valid, error_dict, normalized_sub = _validate_category(category, subcategory)
         if not is_valid:
             # Try to suggest a category
             suggestion = _suggest_category(description)
@@ -264,7 +275,7 @@ def add_expense(description: str, amount: float, category: str, subcategory: str
 
         cursor.execute(
             "INSERT INTO expenses (description, amount, category, subcategory, expense_date) VALUES (?, ?, ?, ?, ?)",
-            (description, amount, category, subcategory, expense_date)
+            (description, amount, category, normalized_sub, expense_date)
         )
         conn.commit()
         expense_id = cursor.lastrowid
@@ -364,17 +375,18 @@ def update_expense(expense_id: int, description: str = None, amount: float = Non
             }
 
         # Validate category if provided
+        normalized_sub = subcategory
         if category:
-            is_valid, error_dict = _validate_category(category, subcategory)
+            is_valid, error_dict, normalized_sub = _validate_category(category, subcategory)
             if not is_valid:
                 conn.close()
                 return error_dict
             # If category changes but subcategory not explicitly given, clear subcategory
             if not subcategory:
-                subcategory = None
+                normalized_sub = None
         else:
             # Category not changing, so keep existing subcategory unless explicitly cleared
-            subcategory = subcategory if subcategory is not None else existing["subcategory"]
+            normalized_sub = subcategory if subcategory is not None else existing["subcategory"]
 
         # Build dynamic SET clause
         updates = []
@@ -388,9 +400,9 @@ def update_expense(expense_id: int, description: str = None, amount: float = Non
         if category is not None:
             updates.append("category = ?")
             params.append(category)
-        if subcategory is not None:
+        if normalized_sub is not None or (category is not None and subcategory is None):
             updates.append("subcategory = ?")
-            params.append(subcategory)
+            params.append(normalized_sub)
         if expense_date is not None:
             updates.append("expense_date = ?")
             params.append(expense_date)
@@ -780,7 +792,7 @@ def add_recurring_expense(description: str, amount: float, category: str, subcat
                 "message": "day_of_month must be between 1 and 28"
             }
 
-        is_valid, error_dict = _validate_category(category, subcategory)
+        is_valid, error_dict, normalized_sub = _validate_category(category, subcategory)
         if not is_valid:
             return error_dict
 
@@ -791,7 +803,7 @@ def add_recurring_expense(description: str, amount: float, category: str, subcat
             """INSERT INTO recurring_expenses
                (description, amount, category, subcategory, day_of_month, active, last_generated_date)
                VALUES (?, ?, ?, ?, ?, 1, NULL)""",
-            (description, amount, category, subcategory, day_of_month)
+            (description, amount, category, normalized_sub, day_of_month)
         )
         conn.commit()
         recurring_id = cursor.lastrowid
@@ -1185,4 +1197,4 @@ If add_expense returns suggested_category/suggested_subcategory in the response 
 
 if __name__ == "__main__":
     init_db()
-    mcp.run()
+    mcp.run(transport="http", host="0.0.0.0", port=8000)
