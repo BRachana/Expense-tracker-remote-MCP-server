@@ -25,16 +25,37 @@ logger = logging.getLogger(__name__)
 
 mcp = FastMCP(name="Expense Tracker")
 
-# Store database in the same folder as main.py
+# Determine database path with fallback for remote/containerized environments
 SCRIPT_DIR = Path(__file__).resolve().parent
-DB_PATH = str(SCRIPT_DIR / "expenses.db")
+
+# Try to use environment variable first, then script dir, then /data, then /tmp
+DB_PATH_ENV = os.getenv("EXPENSE_TRACKER_DB_PATH")
+if DB_PATH_ENV:
+    DB_PATH = DB_PATH_ENV
+    logger.info(f"Using DB_PATH from environment variable: {DB_PATH}")
+else:
+    # Try script directory first
+    script_db = str(SCRIPT_DIR / "expenses.db")
+    if os.access(SCRIPT_DIR, os.W_OK):
+        DB_PATH = script_db
+        logger.info(f"Using DB_PATH in script directory (writable): {DB_PATH}")
+    # Fall back to /data (common in containers)
+    elif os.path.exists("/data") and os.access("/data", os.W_OK):
+        DB_PATH = "/data/expenses.db"
+        logger.info(f"Script directory not writable, using /data: {DB_PATH}")
+    # Last resort: use /tmp
+    else:
+        DB_PATH = "/tmp/expenses.db"
+        logger.warning(f"Script dir and /data not writable, using /tmp (data will be lost on restart): {DB_PATH}")
+
 CATEGORIES_FILE = str(SCRIPT_DIR / "categories.json")
 EXPORTS_DIR = SCRIPT_DIR / "exports"
 RECENT_EXPENSES_LIMIT = 10
 
-logger.info(f"Script directory: {SCRIPT_DIR}")
-logger.info(f"Database path: {DB_PATH}")
-logger.info(f"Categories file: {CATEGORIES_FILE}")
+logger.info(f"[STARTUP] Script directory: {SCRIPT_DIR}")
+logger.info(f"[STARTUP] Database path: {DB_PATH}")
+logger.info(f"[STARTUP] Categories file: {CATEGORIES_FILE}")
+logger.info(f"[STARTUP] Script dir writable: {os.access(SCRIPT_DIR, os.W_OK)}")
 
 # Load categories
 def load_categories():
