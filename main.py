@@ -25,37 +25,42 @@ logger = logging.getLogger(__name__)
 
 mcp = FastMCP(name="Expense Tracker")
 
-# Determine database path with fallback for remote/containerized environments
+# Directory structure
 SCRIPT_DIR = Path(__file__).resolve().parent
+DATA_DIR = SCRIPT_DIR / "data"
+CONFIG_DIR = SCRIPT_DIR / "config"
+EXPORTS_DIR = SCRIPT_DIR / "exports"
+LOGS_DIR = SCRIPT_DIR / "logs"
 
-# Try to use environment variable first, then script dir, then /data, then /tmp
+# Ensure all directories exist
+for dir_path in [DATA_DIR, CONFIG_DIR, EXPORTS_DIR, LOGS_DIR]:
+    dir_path.mkdir(exist_ok=True)
+
+# Database path with environment variable override
 DB_PATH_ENV = os.getenv("EXPENSE_TRACKER_DB_PATH")
 if DB_PATH_ENV:
     DB_PATH = DB_PATH_ENV
-    logger.info(f"Using DB_PATH from environment variable: {DB_PATH}")
+    logger.info(f"[PATHS] Using DB_PATH from environment: {DB_PATH}")
 else:
-    # Try script directory first
-    script_db = str(SCRIPT_DIR / "expenses.db")
-    if os.access(SCRIPT_DIR, os.W_OK):
-        DB_PATH = script_db
-        logger.info(f"Using DB_PATH in script directory (writable): {DB_PATH}")
-    # Fall back to /data (common in containers)
-    elif os.path.exists("/data") and os.access("/data", os.W_OK):
-        DB_PATH = "/data/expenses.db"
-        logger.info(f"Script directory not writable, using /data: {DB_PATH}")
-    # Last resort: use /tmp
-    else:
-        DB_PATH = "/tmp/expenses.db"
-        logger.warning(f"Script dir and /data not writable, using /tmp (data will be lost on restart): {DB_PATH}")
+    DB_PATH = str(DATA_DIR / "expenses.db")
+    logger.info(f"[PATHS] Using default DB_PATH: {DB_PATH}")
 
-CATEGORIES_FILE = str(SCRIPT_DIR / "categories.json")
-EXPORTS_DIR = SCRIPT_DIR / "exports"
+# Categories file path with environment variable override
+CATEGORIES_FILE_ENV = os.getenv("EXPENSE_TRACKER_CONFIG_PATH")
+if CATEGORIES_FILE_ENV:
+    CATEGORIES_FILE = CATEGORIES_FILE_ENV
+    logger.info(f"[PATHS] Using CATEGORIES_FILE from environment: {CATEGORIES_FILE}")
+else:
+    CATEGORIES_FILE = str(CONFIG_DIR / "categories.json")
+    logger.info(f"[PATHS] Using default CATEGORIES_FILE: {CATEGORIES_FILE}")
+
 RECENT_EXPENSES_LIMIT = 10
 
-logger.info(f"[STARTUP] Script directory: {SCRIPT_DIR}")
-logger.info(f"[STARTUP] Database path: {DB_PATH}")
-logger.info(f"[STARTUP] Categories file: {CATEGORIES_FILE}")
-logger.info(f"[STARTUP] Script dir writable: {os.access(SCRIPT_DIR, os.W_OK)}")
+logger.info(f"[PATHS] Script dir: {SCRIPT_DIR}")
+logger.info(f"[PATHS] Data dir: {DATA_DIR} (writable: {os.access(DATA_DIR, os.W_OK)})")
+logger.info(f"[PATHS] Config dir: {CONFIG_DIR} (writable: {os.access(CONFIG_DIR, os.W_OK)})")
+logger.info(f"[PATHS] Exports dir: {EXPORTS_DIR} (writable: {os.access(EXPORTS_DIR, os.W_OK)})")
+logger.info(f"[PATHS] Logs dir: {LOGS_DIR} (writable: {os.access(LOGS_DIR, os.W_OK)})")
 
 # Load categories
 def load_categories():
