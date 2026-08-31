@@ -27,23 +27,33 @@ mcp = FastMCP(name="Expense Tracker")
 
 # Directory structure
 SCRIPT_DIR = Path(__file__).resolve().parent
-DATA_DIR = SCRIPT_DIR / "data"
 CONFIG_DIR = SCRIPT_DIR / "config"
 EXPORTS_DIR = SCRIPT_DIR / "exports"
 LOGS_DIR = SCRIPT_DIR / "logs"
 
+# Data directory - use home directory by default (always writable)
+DB_PATH_ENV = os.getenv("EXPENSE_TRACKER_DB_PATH")
+DATA_PATH_ENV = os.getenv("EXPENSE_TRACKER_DATA_DIR")
+
+if DATA_PATH_ENV:
+    DATA_DIR = Path(DATA_PATH_ENV)
+elif DB_PATH_ENV:
+    DATA_DIR = Path(DB_PATH_ENV).parent
+else:
+    # Default to ~/.expense_tracker (always writable)
+    DATA_DIR = Path.home() / ".expense_tracker"
+
 # Ensure all directories exist
 for dir_path in [DATA_DIR, CONFIG_DIR, EXPORTS_DIR, LOGS_DIR]:
-    dir_path.mkdir(exist_ok=True)
+    dir_path.mkdir(exist_ok=True, mode=0o777)
 
-# Database path with environment variable override
-DB_PATH_ENV = os.getenv("EXPENSE_TRACKER_DB_PATH")
+# Database path
 if DB_PATH_ENV:
     DB_PATH = DB_PATH_ENV
     logger.info(f"[PATHS] Using DB_PATH from environment: {DB_PATH}")
 else:
     DB_PATH = str(DATA_DIR / "expenses.db")
-    logger.info(f"[PATHS] Using default DB_PATH: {DB_PATH}")
+    logger.info(f"[PATHS] Using default DB_PATH (home dir): {DB_PATH}")
 
 # Categories file path with environment variable override
 CATEGORIES_FILE_ENV = os.getenv("EXPENSE_TRACKER_CONFIG_PATH")
@@ -549,7 +559,9 @@ async def list_expenses(category: str = None) -> list[dict]:
         return expenses
     except Exception as e:
         logger.error(f"Error listing expenses: {str(e)}")
-        return []
+        logger.error(traceback.format_exc())
+        # Return error instead of silent empty list
+        return [{"error": f"Failed to list expenses: {str(e)}", "success": False}]
 
 
 @mcp.tool
