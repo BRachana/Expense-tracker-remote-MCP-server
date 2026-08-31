@@ -1,4 +1,3 @@
-import sqlite3
 import os
 import sys
 import json
@@ -6,9 +5,11 @@ import csv
 import logging
 import traceback
 import calendar
+import asyncio
 from pathlib import Path
 from datetime import date, timedelta
 from fastmcp import FastMCP
+import aiosqlite
 
 # Setup proper logging
 logging.basicConfig(
@@ -80,16 +81,20 @@ KEYWORD_MAPS = build_keyword_maps()
 
 
 # ============================================================================
-# SHARED HELPERS
+# SHARED HELPERS (ASYNC)
 # ============================================================================
 
-def get_connection():
-    """Get a database connection with row factory and WAL mode."""
+async def get_connection():
+    """Get an async database connection."""
     try:
+        db_dir = str(Path(DB_PATH).parent)
+        os.makedirs(db_dir, exist_ok=True)
+
         logger.debug(f"Connecting to database: {DB_PATH}")
-        conn = sqlite3.connect(str(DB_PATH), timeout=10.0)
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.row_factory = sqlite3.Row
+        conn = await aiosqlite.connect(DB_PATH)
+        await conn.execute("PRAGMA journal_mode=WAL")
+        conn.row_factory = aiosqlite.Row
+        logger.debug(f"Successfully connected to database")
         return conn
     except Exception as e:
         logger.error(f"Failed to connect to database at {DB_PATH}: {e}")
@@ -132,8 +137,6 @@ def _validate_category(category: str, subcategory: str = None) -> tuple[bool, di
 def _suggest_category(description: str) -> tuple[str, str] | None:
     """Fuzzy-suggest a category from description. Returns (category, subcategory) or None."""
     desc_lower = description.lower()
-
-    # Sort by keyword length descending (longest first)
     sorted_keywords = sorted(KEYWORD_MAPS.keys(), key=len, reverse=True)
 
     for keyword in sorted_keywords:
@@ -144,8 +147,7 @@ def _suggest_category(description: str) -> tuple[str, str] | None:
 
 
 def _build_date_category_where(category: str = None, start_date: str = None, end_date: str = None) -> tuple[str, list]:
-    """Build WHERE clause and params for date/category filtering.
-    Returns (where_clause_str, params_list)"""
+    """Build WHERE clause and params for date/category filtering."""
     where_clause = "WHERE 1=1"
     params = []
 
@@ -165,9 +167,7 @@ def _build_date_category_where(category: str = None, start_date: str = None, end
 
 
 def get_month_bounds(month: str = None) -> tuple[str, str]:
-    """Get first and last day of a month (YYYY-MM-DD).
-    If month is None, returns bounds for current month.
-    month format: 'YYYY-MM' or None"""
+    """Get first and last day of a month (YYYY-MM-DD)."""
     if month:
         year, mon = map(int, month.split('-'))
     else:
@@ -181,16 +181,19 @@ def get_month_bounds(month: str = None) -> tuple[str, str]:
     return first_day.isoformat(), last_day.isoformat()
 
 
-def init_db():
+async def init_db():
     """Initialize the SQLite database with all tables (non-destructive)."""
     try:
         logger.info(f"Initializing database at: {DB_PATH}")
 
-        conn = sqlite3.connect(str(DB_PATH), timeout=10.0)
-        cursor = conn.cursor()
+        db_dir = str(Path(DB_PATH).parent)
+        os.makedirs(db_dir, exist_ok=True)
+        logger.info(f"Database directory: {db_dir}")
+
+        conn = await aiosqlite.connect(DB_PATH)
 
         # Create expenses table
-        cursor.execute("""
+        await conn.execute("""
             CREATE TABLE IF NOT EXISTS expenses (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 description TEXT NOT NULL,
@@ -204,7 +207,7 @@ def init_db():
         """)
 
         # Create budgets table
-        cursor.execute("""
+        await conn.execute("""
             CREATE TABLE IF NOT EXISTS budgets (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 category TEXT NOT NULL UNIQUE,
@@ -215,7 +218,7 @@ def init_db():
         """)
 
         # Create recurring_expenses table
-        cursor.execute("""
+        await conn.execute("""
             CREATE TABLE IF NOT EXISTS recurring_expenses (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 description TEXT NOT NULL,
@@ -230,14 +233,15 @@ def init_db():
         """)
 
         # Additive migration: add updated_at column to expenses if missing
-        cursor.execute("PRAGMA table_info(expenses)")
-        existing_cols = {row[1] for row in cursor.fetchall()}
+        cursor = await conn.execute("PRAGMA table_info(expenses)")
+        rows = await cursor.fetchall()
+        existing_cols = {row[1] for row in rows}
         if "updated_at" not in existing_cols:
-            cursor.execute("ALTER TABLE expenses ADD COLUMN updated_at TEXT")
+            await conn.execute("ALTER TABLE expenses ADD COLUMN updated_at TEXT")
             logger.info("Added updated_at column to expenses table")
 
-        conn.commit()
-        conn.close()
+        await conn.commit()
+        await conn.close()
         logger.info(f"Database ready at: {DB_PATH}")
     except Exception as e:
         logger.error(f"Error initializing database: {e}")
@@ -245,30 +249,17 @@ def init_db():
 
 
 # ============================================================================
-# CRUD TOOLS
+# CRUD TOOLS (ASYNC)
 # ============================================================================
 
 @mcp.tool
-def add_expense(description: str, amount: float, category: str, subcategory: str = None, expense_date: str = None) -> dict:
-    """Add a new expense to the tracker.
-
-    Args:
-        description: Description of the expense
-        amount: Amount spent
-        category: Category of the expense (from available categories)
-        subcategory: Subcategory within the category (optional)
-        expense_date: Date of the expense in YYYY-MM-DD format (default: today)
-
-    Returns:
-        Success message with the expense ID
-    """
+async def add_expense(description: str, amount: float, category: str, subcategory: str = None, expense_date: str = None) -> dict:
+    """Add a new expense to the tracker."""
     try:
-        logger.info(f"add_expense called: desc={description}, amount={amount}, category={category}, subcategory={subcategory}")
+        logger.info(f"add_expense called: desc={description}, amount={amount}, category={category}")
 
-        # Validate category
         is_valid, error_dict, normalized_sub = _validate_category(category, subcategory)
         if not is_valid:
-            # Try to suggest a category
             suggestion = _suggest_category(description)
             if suggestion:
                 sug_cat, sug_sub = suggestion
@@ -277,16 +268,17 @@ def add_expense(description: str, amount: float, category: str, subcategory: str
                 error_dict["suggested_subcategory"] = sug_sub
             return error_dict
 
-        conn = get_connection()
-        cursor = conn.cursor()
-
-        cursor.execute(
+        conn = await get_connection()
+        await conn.execute(
             "INSERT INTO expenses (description, amount, category, subcategory, expense_date) VALUES (?, ?, ?, ?, ?)",
             (description, amount, category, normalized_sub, expense_date)
         )
-        conn.commit()
-        expense_id = cursor.lastrowid
-        conn.close()
+        await conn.commit()
+
+        cursor = await conn.execute("SELECT last_insert_rowid() as id")
+        row = await cursor.fetchone()
+        expense_id = row[0]
+        await conn.close()
 
         logger.info(f"Expense added successfully with ID: {expense_id}")
 
@@ -297,7 +289,7 @@ def add_expense(description: str, amount: float, category: str, subcategory: str
             "description": description,
             "amount": amount,
             "category": category,
-            "subcategory": subcategory,
+            "subcategory": normalized_sub,
             "expense_date": expense_date or "today"
         }
     except Exception as e:
@@ -311,24 +303,15 @@ def add_expense(description: str, amount: float, category: str, subcategory: str
 
 
 @mcp.tool
-def get_expense(expense_id: int) -> dict:
-    """Get a single expense by ID.
-
-    Args:
-        expense_id: ID of the expense
-
-    Returns:
-        Expense details or not-found message
-    """
+async def get_expense(expense_id: int) -> dict:
+    """Get a single expense by ID."""
     try:
         logger.info(f"get_expense called with id={expense_id}")
 
-        conn = get_connection()
-        cursor = conn.cursor()
-
-        cursor.execute("SELECT * FROM expenses WHERE id = ?", (expense_id,))
-        row = cursor.fetchone()
-        conn.close()
+        conn = await get_connection()
+        cursor = await conn.execute("SELECT * FROM expenses WHERE id = ?", (expense_id,))
+        row = await cursor.fetchone()
+        await conn.close()
 
         if not row:
             return {
@@ -338,11 +321,14 @@ def get_expense(expense_id: int) -> dict:
 
         return {
             "success": True,
-            "expense": dict(row)
+            "expense": dict(row) if hasattr(row, 'keys') else {
+                'id': row[0], 'description': row[1], 'amount': row[2],
+                'category': row[3], 'subcategory': row[4], 'expense_date': row[5],
+                'created_at': row[6], 'updated_at': row[7]
+            }
         }
     except Exception as e:
         logger.error(f"Error getting expense: {str(e)}")
-        logger.error(traceback.format_exc())
         return {
             "success": False,
             "message": f"Error: {str(e)}",
@@ -351,51 +337,33 @@ def get_expense(expense_id: int) -> dict:
 
 
 @mcp.tool
-def update_expense(expense_id: int, description: str = None, amount: float = None, category: str = None, subcategory: str = None, expense_date: str = None) -> dict:
-    """Update an existing expense.
-
-    Args:
-        expense_id: ID of the expense to update
-        description: New description (optional)
-        amount: New amount (optional)
-        category: New category (optional)
-        subcategory: New subcategory (optional)
-        expense_date: New date (optional)
-
-    Returns:
-        Updated expense or error
-    """
+async def update_expense(expense_id: int, description: str = None, amount: float = None, category: str = None, subcategory: str = None, expense_date: str = None) -> dict:
+    """Update an existing expense."""
     try:
         logger.info(f"update_expense called with id={expense_id}")
 
-        conn = get_connection()
-        cursor = conn.cursor()
+        conn = await get_connection()
 
-        # Check if expense exists
-        cursor.execute("SELECT * FROM expenses WHERE id = ?", (expense_id,))
-        existing = cursor.fetchone()
+        cursor = await conn.execute("SELECT * FROM expenses WHERE id = ?", (expense_id,))
+        existing = await cursor.fetchone()
         if not existing:
-            conn.close()
+            await conn.close()
             return {
                 "success": False,
                 "message": f"Expense {expense_id} not found"
             }
 
-        # Validate category if provided
         normalized_sub = subcategory
         if category:
             is_valid, error_dict, normalized_sub = _validate_category(category, subcategory)
             if not is_valid:
-                conn.close()
+                await conn.close()
                 return error_dict
-            # If category changes but subcategory not explicitly given, clear subcategory
             if not subcategory:
                 normalized_sub = None
         else:
-            # Category not changing, so keep existing subcategory unless explicitly cleared
-            normalized_sub = subcategory if subcategory is not None else existing["subcategory"]
+            normalized_sub = subcategory if subcategory is not None else existing[4]
 
-        # Build dynamic SET clause
         updates = []
         params = []
         if description is not None:
@@ -414,30 +382,31 @@ def update_expense(expense_id: int, description: str = None, amount: float = Non
             updates.append("expense_date = ?")
             params.append(expense_date)
 
-        # Always update updated_at
         updates.append("updated_at = CURRENT_TIMESTAMP")
         params.append(expense_id)
 
-        if updates:
-            query = f"UPDATE expenses SET {', '.join(updates)} WHERE id = ?"
-            cursor.execute(query, params)
-            conn.commit()
+        if len(updates) > 1:
+            query = f"UPDATE expenses SET {', '.join(updates[:-1])} WHERE id = ?"
+            await conn.execute(query, params)
+            await conn.commit()
 
-        # Fetch updated row
-        cursor.execute("SELECT * FROM expenses WHERE id = ?", (expense_id,))
-        updated = dict(cursor.fetchone())
-        conn.close()
+        cursor = await conn.execute("SELECT * FROM expenses WHERE id = ?", (expense_id,))
+        updated = await cursor.fetchone()
+        await conn.close()
 
         logger.info(f"Expense {expense_id} updated successfully")
 
         return {
             "success": True,
             "message": "Expense updated",
-            "expense": updated
+            "expense": dict(updated) if hasattr(updated, 'keys') else {
+                'id': updated[0], 'description': updated[1], 'amount': updated[2],
+                'category': updated[3], 'subcategory': updated[4], 'expense_date': updated[5],
+                'created_at': updated[6], 'updated_at': updated[7]
+            }
         }
     except Exception as e:
         logger.error(f"Error updating expense: {str(e)}")
-        logger.error(traceback.format_exc())
         return {
             "success": False,
             "message": f"Error: {str(e)}",
@@ -446,31 +415,15 @@ def update_expense(expense_id: int, description: str = None, amount: float = Non
 
 
 @mcp.tool
-def delete_expense(expense_id: int) -> dict:
-    """Delete an expense.
-
-    Args:
-        expense_id: ID of the expense to delete
-
-    Returns:
-        Confirmation message
-    """
+async def delete_expense(expense_id: int) -> dict:
+    """Delete an expense."""
     try:
         logger.info(f"delete_expense called with id={expense_id}")
 
-        conn = get_connection()
-        cursor = conn.cursor()
-
-        cursor.execute("DELETE FROM expenses WHERE id = ?", (expense_id,))
-        conn.commit()
-        rowcount = cursor.rowcount
-        conn.close()
-
-        if rowcount == 0:
-            return {
-                "success": False,
-                "message": f"Expense {expense_id} not found"
-            }
+        conn = await get_connection()
+        await conn.execute("DELETE FROM expenses WHERE id = ?", (expense_id,))
+        await conn.commit()
+        await conn.close()
 
         logger.info(f"Expense {expense_id} deleted successfully")
 
@@ -481,7 +434,6 @@ def delete_expense(expense_id: int) -> dict:
         }
     except Exception as e:
         logger.error(f"Error deleting expense: {str(e)}")
-        logger.error(traceback.format_exc())
         return {
             "success": False,
             "message": f"Error: {str(e)}",
@@ -490,91 +442,66 @@ def delete_expense(expense_id: int) -> dict:
 
 
 # ============================================================================
-# LIST & SUMMARIZE TOOLS
+# LIST & SUMMARIZE TOOLS (ASYNC)
 # ============================================================================
 
 @mcp.tool
-def list_expenses(category: str = None) -> list[dict]:
-    """List all expenses or filter by category.
-
-    Args:
-        category: Optional category to filter expenses
-
-    Returns:
-        List of expenses
-    """
+async def list_expenses(category: str = None) -> list[dict]:
+    """List all expenses or filter by category."""
     try:
         logger.info(f"list_expenses called with category={category}")
 
-        conn = get_connection()
-        cursor = conn.cursor()
+        conn = await get_connection()
 
         if category:
-            cursor.execute(
-                "SELECT id, description, amount, category, subcategory, expense_date, created_at, updated_at FROM expenses WHERE category = ? ORDER BY expense_date DESC",
-                (category,)
-            )
+            query = "SELECT id, description, amount, category, subcategory, expense_date, created_at, updated_at FROM expenses WHERE category = ? ORDER BY expense_date DESC"
+            cursor = await conn.execute(query, (category,))
         else:
-            cursor.execute(
-                "SELECT id, description, amount, category, subcategory, expense_date, created_at, updated_at FROM expenses ORDER BY expense_date DESC"
-            )
+            query = "SELECT id, description, amount, category, subcategory, expense_date, created_at, updated_at FROM expenses ORDER BY expense_date DESC"
+            cursor = await conn.execute(query)
 
-        rows = cursor.fetchall()
-        conn.close()
+        rows = await cursor.fetchall()
+        await conn.close()
 
-        expenses = [dict(row) for row in rows]
+        expenses = []
+        for row in rows:
+            if hasattr(row, 'keys'):
+                expenses.append(dict(row))
+            else:
+                expenses.append({
+                    'id': row[0], 'description': row[1], 'amount': row[2],
+                    'category': row[3], 'subcategory': row[4], 'expense_date': row[5],
+                    'created_at': row[6], 'updated_at': row[7]
+                })
+
         logger.info(f"Retrieved {len(expenses)} expenses")
         return expenses
-
     except Exception as e:
         logger.error(f"Error listing expenses: {str(e)}")
-        logger.error(traceback.format_exc())
         return []
 
 
 @mcp.tool
-def summarize_expenses(category: str = None, start_date: str = None, end_date: str = None) -> dict:
-    """Summarize expenses by category with optional date range and category filter.
-
-    Args:
-        category: Optional specific category to summarize (e.g., 'Transport', 'Groceries')
-        start_date: Start date in YYYY-MM-DD format (optional)
-        end_date: End date in YYYY-MM-DD format (optional)
-
-    Returns:
-        Dictionary with category totals and overall summary
-    """
+async def summarize_expenses(category: str = None, start_date: str = None, end_date: str = None) -> dict:
+    """Summarize expenses by category with optional date range and category filter."""
     try:
         logger.info(f"summarize_expenses called with category={category}, start_date={start_date}, end_date={end_date}")
 
-        conn = get_connection()
-        cursor = conn.cursor()
+        conn = await get_connection()
 
         where_clause, params = _build_date_category_where(category, start_date, end_date)
 
         if category:
-            query = f"""
-                SELECT description, amount, expense_date, category, subcategory
-                FROM expenses
-                {where_clause}
-                ORDER BY expense_date DESC
-            """
-            cursor.execute(query, params)
-            rows = cursor.fetchall()
+            query = f"SELECT description, amount, expense_date, category, subcategory FROM expenses {where_clause} ORDER BY expense_date DESC"
+            cursor = await conn.execute(query, params)
+            rows = await cursor.fetchall()
         else:
-            query = f"""
-                SELECT category, SUM(amount) as total, COUNT(*) as count
-                FROM expenses
-                {where_clause}
-                GROUP BY category
-                ORDER BY total DESC
-            """
-            cursor.execute(query, params)
-            rows = cursor.fetchall()
+            query = f"SELECT category, SUM(amount) as total, COUNT(*) as count FROM expenses {where_clause} GROUP BY category ORDER BY total DESC"
+            cursor = await conn.execute(query, params)
+            rows = await cursor.fetchall()
 
-        conn.close()
+        await conn.close()
 
-        # Build summary
         summary = {
             "filters": {
                 "category": category or "All",
@@ -587,12 +514,13 @@ def summarize_expenses(category: str = None, start_date: str = None, end_date: s
             total_amount = 0
             expenses_list = []
             for row in rows:
-                total_amount += row["amount"]
+                amount = row[1] if not hasattr(row, 'keys') else row['amount']
+                total_amount += amount
                 expenses_list.append({
-                    "description": row["description"],
-                    "amount": row["amount"],
-                    "subcategory": row["subcategory"],
-                    "date": row["expense_date"]
+                    "description": row[0] if not hasattr(row, 'keys') else row['description'],
+                    "amount": amount,
+                    "subcategory": row[4] if not hasattr(row, 'keys') else row['subcategory'],
+                    "date": row[2] if not hasattr(row, 'keys') else row['expense_date']
                 })
 
             summary["category"] = category
@@ -600,31 +528,30 @@ def summarize_expenses(category: str = None, start_date: str = None, end_date: s
             summary["total"] = total_amount
             summary["count"] = len(expenses_list)
             summary["average"] = round(total_amount / len(expenses_list), 2) if len(expenses_list) > 0 else 0
-            logger.info(f"Summary for {category}: {len(expenses_list)} expenses, ₹{total_amount}")
         else:
             summary["categories"] = {}
             total_amount = 0
             total_count = 0
             for row in rows:
-                summary["categories"][row["category"]] = {
-                    "total": row["total"],
-                    "count": row["count"],
-                    "average": round(row["total"] / row["count"], 2) if row["count"] > 0 else 0
+                cat = row[0] if not hasattr(row, 'keys') else row['category']
+                total = row[1] if not hasattr(row, 'keys') else row['total']
+                count = row[2] if not hasattr(row, 'keys') else row['count']
+                summary["categories"][cat] = {
+                    "total": total,
+                    "count": count,
+                    "average": round(total / count, 2) if count > 0 else 0
                 }
-                total_amount += row["total"]
-                total_count += row["count"]
+                total_amount += total
+                total_count += count
 
             summary["overall"] = {
                 "total_amount": total_amount,
                 "total_expenses": total_count
             }
-            logger.info(f"Summary generated: {total_count} expenses, ₹{total_amount}")
 
         return summary
-
     except Exception as e:
         logger.error(f"Error summarizing expenses: {str(e)}")
-        logger.error(traceback.format_exc())
         return {
             "success": False,
             "message": f"Error: {str(e)}",
@@ -633,20 +560,12 @@ def summarize_expenses(category: str = None, start_date: str = None, end_date: s
 
 
 # ============================================================================
-# BUDGET TOOLS
+# BUDGET TOOLS (ASYNC)
 # ============================================================================
 
 @mcp.tool
-def set_budget(category: str, monthly_limit: float) -> dict:
-    """Set or update a budget for a category.
-
-    Args:
-        category: Category name or "Overall" for total budget
-        monthly_limit: Monthly budget limit in rupees
-
-    Returns:
-        Confirmation with budget details
-    """
+async def set_budget(category: str, monthly_limit: float) -> dict:
+    """Set or update a budget for a category."""
     try:
         logger.info(f"set_budget called: category={category}, limit={monthly_limit}")
 
@@ -658,10 +577,8 @@ def set_budget(category: str, monthly_limit: float) -> dict:
                 "available_categories": list(valid_categories)
             }
 
-        conn = get_connection()
-        cursor = conn.cursor()
-
-        cursor.execute(
+        conn = await get_connection()
+        await conn.execute(
             """INSERT INTO budgets (category, monthly_limit, updated_at)
                VALUES (?, ?, CURRENT_TIMESTAMP)
                ON CONFLICT(category) DO UPDATE SET
@@ -669,8 +586,8 @@ def set_budget(category: str, monthly_limit: float) -> dict:
                    updated_at = CURRENT_TIMESTAMP""",
             (category, monthly_limit)
         )
-        conn.commit()
-        conn.close()
+        await conn.commit()
+        await conn.close()
 
         logger.info(f"Budget set for {category}: ₹{monthly_limit}")
 
@@ -682,7 +599,6 @@ def set_budget(category: str, monthly_limit: float) -> dict:
         }
     except Exception as e:
         logger.error(f"Error setting budget: {str(e)}")
-        logger.error(traceback.format_exc())
         return {
             "success": False,
             "message": f"Error: {str(e)}",
@@ -691,50 +607,39 @@ def set_budget(category: str, monthly_limit: float) -> dict:
 
 
 @mcp.tool
-def check_budget_status(category: str = None, month: str = None) -> dict:
-    """Check spending against budget for a category/month.
-
-    Args:
-        category: Category to check (optional, defaults to "Overall")
-        month: Month in YYYY-MM format (optional, defaults to current month)
-
-    Returns:
-        Budget status with spending info
-    """
+async def check_budget_status(category: str = None, month: str = None) -> dict:
+    """Check spending against budget for a category/month."""
     try:
         logger.info(f"check_budget_status called: category={category}, month={month}")
 
         category = category or "Overall"
         start_date, end_date = get_month_bounds(month)
 
-        conn = get_connection()
-        cursor = conn.cursor()
+        conn = await get_connection()
 
-        # Get budget
-        cursor.execute("SELECT monthly_limit FROM budgets WHERE category = ?", (category,))
-        budget_row = cursor.fetchone()
+        cursor = await conn.execute("SELECT monthly_limit FROM budgets WHERE category = ?", (category,))
+        budget_row = await cursor.fetchone()
 
         if not budget_row:
-            conn.close()
+            await conn.close()
             return {
                 "success": False,
                 "message": f"No budget set for {category}"
             }
 
-        limit = budget_row["monthly_limit"]
+        limit = budget_row[0] if isinstance(budget_row, tuple) else budget_row['monthly_limit']
 
-        # Calculate spending
         where_clause, params = _build_date_category_where(
             category if category != "Overall" else None,
             start_date,
             end_date
         )
         query = f"SELECT COALESCE(SUM(amount), 0) as total FROM expenses {where_clause}"
-        cursor.execute(query, params)
-        spent = cursor.fetchone()["total"]
-        conn.close()
+        cursor = await conn.execute(query, params)
+        spent_row = await cursor.fetchone()
+        spent = spent_row[0] if isinstance(spent_row, tuple) else spent_row['total']
+        await conn.close()
 
-        # Calculate status
         remaining = limit - spent
         percent_used = round(spent / limit * 100, 1) if limit > 0 else 0
 
@@ -747,8 +652,6 @@ def check_budget_status(category: str = None, month: str = None) -> dict:
         else:
             status = "ok"
             status_msg = f"Within budget: {percent_used}% used"
-
-        logger.info(f"Budget status for {category} ({month or 'current month'}): {status}")
 
         return {
             "success": True,
@@ -763,7 +666,6 @@ def check_budget_status(category: str = None, month: str = None) -> dict:
         }
     except Exception as e:
         logger.error(f"Error checking budget: {str(e)}")
-        logger.error(traceback.format_exc())
         return {
             "success": False,
             "message": f"Error: {str(e)}",
@@ -772,27 +674,15 @@ def check_budget_status(category: str = None, month: str = None) -> dict:
 
 
 # ============================================================================
-# RECURRING EXPENSE TOOLS
+# RECURRING EXPENSE TOOLS (ASYNC)
 # ============================================================================
 
 @mcp.tool
-def add_recurring_expense(description: str, amount: float, category: str, subcategory: str = None, day_of_month: int = 1) -> dict:
-    """Add a recurring monthly expense.
-
-    Args:
-        description: Description of the expense
-        amount: Monthly amount
-        category: Category of the expense
-        subcategory: Subcategory (optional)
-        day_of_month: Day of month to recur (1-28, default 1)
-
-    Returns:
-        Confirmation with recurring expense ID
-    """
+async def add_recurring_expense(description: str, amount: float, category: str, subcategory: str = None, day_of_month: int = 1) -> dict:
+    """Add a recurring monthly expense."""
     try:
         logger.info(f"add_recurring_expense: desc={description}, amount={amount}, category={category}, day={day_of_month}")
 
-        # Validate
         if not (1 <= day_of_month <= 28):
             return {
                 "success": False,
@@ -803,18 +693,19 @@ def add_recurring_expense(description: str, amount: float, category: str, subcat
         if not is_valid:
             return error_dict
 
-        conn = get_connection()
-        cursor = conn.cursor()
-
-        cursor.execute(
+        conn = await get_connection()
+        await conn.execute(
             """INSERT INTO recurring_expenses
                (description, amount, category, subcategory, day_of_month, active, last_generated_date)
                VALUES (?, ?, ?, ?, ?, 1, NULL)""",
             (description, amount, category, normalized_sub, day_of_month)
         )
-        conn.commit()
-        recurring_id = cursor.lastrowid
-        conn.close()
+        await conn.commit()
+
+        cursor = await conn.execute("SELECT last_insert_rowid() as id")
+        row = await cursor.fetchone()
+        recurring_id = row[0]
+        await conn.close()
 
         logger.info(f"Recurring expense added with ID: {recurring_id}")
 
@@ -829,7 +720,6 @@ def add_recurring_expense(description: str, amount: float, category: str, subcat
         }
     except Exception as e:
         logger.error(f"Error adding recurring expense: {str(e)}")
-        logger.error(traceback.format_exc())
         return {
             "success": False,
             "message": f"Error: {str(e)}",
@@ -838,84 +728,79 @@ def add_recurring_expense(description: str, amount: float, category: str, subcat
 
 
 @mcp.tool
-def list_recurring_expenses(active_only: bool = True) -> list[dict]:
-    """List all recurring expenses.
-
-    Args:
-        active_only: Show only active recurring expenses (default True)
-
-    Returns:
-        List of recurring expenses
-    """
+async def list_recurring_expenses(active_only: bool = True) -> list[dict]:
+    """List all recurring expenses."""
     try:
         logger.info(f"list_recurring_expenses called, active_only={active_only}")
 
-        conn = get_connection()
-        cursor = conn.cursor()
+        conn = await get_connection()
 
         if active_only:
-            cursor.execute("SELECT * FROM recurring_expenses WHERE active = 1 ORDER BY day_of_month")
+            cursor = await conn.execute("SELECT * FROM recurring_expenses WHERE active = 1 ORDER BY day_of_month")
         else:
-            cursor.execute("SELECT * FROM recurring_expenses ORDER BY day_of_month")
+            cursor = await conn.execute("SELECT * FROM recurring_expenses ORDER BY day_of_month")
 
-        rows = cursor.fetchall()
-        conn.close()
+        rows = await cursor.fetchall()
+        await conn.close()
 
-        return [dict(row) for row in rows]
+        result = []
+        for row in rows:
+            if hasattr(row, 'keys'):
+                result.append(dict(row))
+            else:
+                result.append({
+                    'id': row[0], 'description': row[1], 'amount': row[2],
+                    'category': row[3], 'subcategory': row[4], 'day_of_month': row[5],
+                    'active': row[6], 'last_generated_date': row[7], 'created_at': row[8]
+                })
+
+        return result
     except Exception as e:
         logger.error(f"Error listing recurring expenses: {str(e)}")
-        logger.error(traceback.format_exc())
         return []
 
 
 @mcp.tool
-def generate_due_recurring_expenses() -> dict:
-    """Generate expenses for recurring items that are due.
-
-    Processes all active recurring expenses and creates new expense rows
-    for any that are due since their last_generated_date.
-
-    Returns:
-        Count and list of generated expenses
-    """
+async def generate_due_recurring_expenses() -> dict:
+    """Generate expenses for recurring items that are due."""
     try:
         logger.info("generate_due_recurring_expenses called")
 
         today = date.today()
-        conn = get_connection()
-        cursor = conn.cursor()
+        conn = await get_connection()
 
-        # Get all active recurring expenses
-        cursor.execute("SELECT * FROM recurring_expenses WHERE active = 1")
-        recurring_rows = cursor.fetchall()
+        cursor = await conn.execute("SELECT * FROM recurring_expenses WHERE active = 1")
+        recurring_rows = await cursor.fetchall()
 
         generated = []
 
         for rec in recurring_rows:
-            recurring_id = rec["id"]
-            last_generated = rec["last_generated_date"]
+            recurring_id = rec[0] if isinstance(rec, tuple) else rec['id']
+            last_generated = rec[7] if isinstance(rec, tuple) else rec['last_generated_date']
 
-            # Determine start month for generation
             if last_generated:
                 last_date = date.fromisoformat(last_generated)
                 current_month = date(last_date.year, last_date.month, 1) + timedelta(days=32)
                 current_month = date(current_month.year, current_month.month, 1)
             else:
-                # Never generated; use creation month
                 current_month = today.replace(day=1)
 
-            # Generate for each month up to today
-            due_date = current_month.replace(day=min(rec["day_of_month"], 28))
+            day_of_month = rec[5] if isinstance(rec, tuple) else rec['day_of_month']
+            due_date = current_month.replace(day=min(day_of_month, 28))
 
             while due_date <= today:
-                # Insert expense
-                cursor.execute(
+                await conn.execute(
                     """INSERT INTO expenses
                        (description, amount, category, subcategory, expense_date)
                        VALUES (?, ?, ?, ?, ?)""",
-                    (rec["description"], rec["amount"], rec["category"], rec["subcategory"], due_date.isoformat())
+                    (rec[1], rec[2], rec[3], rec[4], due_date.isoformat()) if isinstance(rec, tuple)
+                    else (rec['description'], rec['amount'], rec['category'], rec['subcategory'], due_date.isoformat())
                 )
-                expense_id = cursor.lastrowid
+                await conn.commit()
+
+                cursor = await conn.execute("SELECT last_insert_rowid() as id")
+                id_row = await cursor.fetchone()
+                expense_id = id_row[0]
 
                 generated.append({
                     "recurring_id": recurring_id,
@@ -923,21 +808,19 @@ def generate_due_recurring_expenses() -> dict:
                     "expense_date": due_date.isoformat()
                 })
 
-                # Advance to next month
                 next_month = due_date + timedelta(days=32)
                 next_month = next_month.replace(day=1)
-                due_date = next_month.replace(day=min(rec["day_of_month"], 28))
+                due_date = next_month.replace(day=min(day_of_month, 28))
 
-            # Update last_generated_date
             if generated:
                 last_gen_date = generated[-1]["expense_date"]
-                cursor.execute(
+                await conn.execute(
                     "UPDATE recurring_expenses SET last_generated_date = ? WHERE id = ?",
                     (last_gen_date, recurring_id)
                 )
+                await conn.commit()
 
-        conn.commit()
-        conn.close()
+        await conn.close()
 
         logger.info(f"Generated {len(generated)} recurring expenses")
 
@@ -948,7 +831,6 @@ def generate_due_recurring_expenses() -> dict:
         }
     except Exception as e:
         logger.error(f"Error generating recurring expenses: {str(e)}")
-        logger.error(traceback.format_exc())
         return {
             "success": False,
             "message": f"Error: {str(e)}",
@@ -957,44 +839,32 @@ def generate_due_recurring_expenses() -> dict:
 
 
 # ============================================================================
-# EXPORT & REPORTING TOOLS
+# EXPORT & REPORTING TOOLS (ASYNC)
 # ============================================================================
 
 @mcp.tool
-def export_expenses_csv(start_date: str = None, end_date: str = None, category: str = None) -> dict:
-    """Export expenses to a CSV file.
-
-    Args:
-        start_date: Start date in YYYY-MM-DD format (optional)
-        end_date: End date in YYYY-MM-DD format (optional)
-        category: Filter by category (optional)
-
-    Returns:
-        File path and row count
-    """
+async def export_expenses_csv(start_date: str = None, end_date: str = None, category: str = None) -> dict:
+    """Export expenses to a CSV file."""
     try:
         logger.info(f"export_expenses_csv called with filters: start={start_date}, end={end_date}, category={category}")
 
         EXPORTS_DIR.mkdir(exist_ok=True)
 
-        conn = get_connection()
-        cursor = conn.cursor()
+        conn = await get_connection()
 
         where_clause, params = _build_date_category_where(category, start_date, end_date)
         query = f"""SELECT id, description, amount, category, subcategory, expense_date, created_at
                     FROM expenses
                     {where_clause}
                     ORDER BY expense_date DESC"""
-        cursor.execute(query, params)
-        rows = cursor.fetchall()
-        conn.close()
+        cursor = await conn.execute(query, params)
+        rows = await cursor.fetchall()
+        await conn.close()
 
-        # Create filename with timestamp
         now = date.today().isoformat().replace('-', '') + "_" + str(int(date.today().isoformat().split('-')[2]))
         filename = f"expenses_export_{now}.csv"
         filepath = EXPORTS_DIR / filename
 
-        # Write CSV
         with open(filepath, 'w', newline='', encoding='utf-8') as f:
             writer = csv.writer(f)
             writer.writerow(['id', 'description', 'amount', 'category', 'subcategory', 'expense_date', 'created_at'])
@@ -1015,7 +885,6 @@ def export_expenses_csv(start_date: str = None, end_date: str = None, category: 
         }
     except Exception as e:
         logger.error(f"Error exporting CSV: {str(e)}")
-        logger.error(traceback.format_exc())
         return {
             "success": False,
             "message": f"Error: {str(e)}",
@@ -1024,51 +893,53 @@ def export_expenses_csv(start_date: str = None, end_date: str = None, category: 
 
 
 @mcp.tool
-def monthly_report(months: int = 6) -> dict:
-    """Generate a monthly expense report.
-
-    Args:
-        months: Number of months to include (default 6)
-
-    Returns:
-        Monthly trend, top expenses, and summary
-    """
+async def monthly_report(months: int = 6) -> dict:
+    """Generate a monthly expense report."""
     try:
         logger.info(f"monthly_report called with months={months}")
 
-        # Calculate date range
         end_date = date.today()
         start_date = end_date - timedelta(days=30 * months)
 
-        conn = get_connection()
-        cursor = conn.cursor()
+        conn = await get_connection()
 
-        # Monthly trend
         query = """SELECT strftime('%Y-%m', expense_date) as month,
                           SUM(amount) as total, COUNT(*) as count
                    FROM expenses
                    WHERE expense_date >= ? AND expense_date <= ?
                    GROUP BY month
                    ORDER BY month"""
-        cursor.execute(query, (start_date.isoformat(), end_date.isoformat()))
-        trend_rows = cursor.fetchall()
-        monthly_trend = [{"month": row["month"], "total": row["total"], "count": row["count"]} for row in trend_rows]
+        cursor = await conn.execute(query, (start_date.isoformat(), end_date.isoformat()))
+        trend_rows = await cursor.fetchall()
+        monthly_trend = []
+        for row in trend_rows:
+            monthly_trend.append({
+                "month": row[0] if isinstance(row, tuple) else row['month'],
+                "total": row[1] if isinstance(row, tuple) else row['total'],
+                "count": row[2] if isinstance(row, tuple) else row['count']
+            })
 
-        # Top expenses
         query = """SELECT id, description, amount, category, subcategory, expense_date
                    FROM expenses
                    WHERE expense_date >= ? AND expense_date <= ?
                    ORDER BY amount DESC
                    LIMIT 5"""
-        cursor.execute(query, (start_date.isoformat(), end_date.isoformat()))
-        top_rows = cursor.fetchall()
-        top_expenses = [dict(row) for row in top_rows]
+        cursor = await conn.execute(query, (start_date.isoformat(), end_date.isoformat()))
+        top_rows = await cursor.fetchall()
+        top_expenses = []
+        for row in top_rows:
+            if hasattr(row, 'keys'):
+                top_expenses.append(dict(row))
+            else:
+                top_expenses.append({
+                    'id': row[0], 'description': row[1], 'amount': row[2],
+                    'category': row[3], 'subcategory': row[4], 'expense_date': row[5]
+                })
 
-        # Average monthly spend
-        total_spent = sum(row["total"] for row in trend_rows)
+        await conn.close()
+
+        total_spent = sum(t["total"] for t in monthly_trend)
         avg_monthly = round(total_spent / len(monthly_trend), 2) if monthly_trend else 0
-
-        conn.close()
 
         logger.info(f"Monthly report generated for {len(monthly_trend)} months")
 
@@ -1085,7 +956,6 @@ def monthly_report(months: int = 6) -> dict:
         }
     except Exception as e:
         logger.error(f"Error generating monthly report: {str(e)}")
-        logger.error(traceback.format_exc())
         return {
             "success": False,
             "message": f"Error: {str(e)}",
@@ -1094,7 +964,7 @@ def monthly_report(months: int = 6) -> dict:
 
 
 # ============================================================================
-# RESOURCES
+# RESOURCES (ASYNC)
 # ============================================================================
 
 @mcp.resource("categories://list")
@@ -1109,41 +979,50 @@ def resource_categories() -> str:
 
 
 @mcp.resource("expenses://recent")
-def resource_recent_expenses() -> str:
+async def resource_recent_expenses() -> str:
     """Resource: Recent expenses (last 10)."""
     try:
-        conn = get_connection()
-        cursor = conn.cursor()
-        cursor.execute(
+        conn = await get_connection()
+        cursor = await conn.execute(
             "SELECT * FROM expenses ORDER BY expense_date DESC, id DESC LIMIT ?",
             (RECENT_EXPENSES_LIMIT,)
         )
-        rows = [dict(row) for row in cursor.fetchall()]
-        conn.close()
+        rows = await cursor.fetchall()
+        await conn.close()
 
-        return json.dumps({"limit": RECENT_EXPENSES_LIMIT, "expenses": rows})
+        expenses = []
+        for row in rows:
+            if hasattr(row, 'keys'):
+                expenses.append(dict(row))
+            else:
+                expenses.append({
+                    'id': row[0], 'description': row[1], 'amount': row[2],
+                    'category': row[3], 'subcategory': row[4], 'expense_date': row[5],
+                    'created_at': row[6], 'updated_at': row[7]
+                })
+
+        return json.dumps({"limit": RECENT_EXPENSES_LIMIT, "expenses": expenses})
     except Exception as e:
         logger.error(f"Error reading recent expenses resource: {e}")
         return json.dumps({"error": str(e)})
 
 
 @mcp.resource("expenses://summary")
-def resource_summary() -> str:
+async def resource_summary() -> str:
     """Resource: Current month expense summary by category."""
     try:
         start_date, end_date = get_month_bounds(None)
 
-        conn = get_connection()
-        cursor = conn.cursor()
+        conn = await get_connection()
 
         query = f"""SELECT category, SUM(amount) as total, COUNT(*) as count
                     FROM expenses
                     WHERE expense_date BETWEEN ? AND ?
                     GROUP BY category
                     ORDER BY total DESC"""
-        cursor.execute(query, (start_date, end_date))
-        rows = cursor.fetchall()
-        conn.close()
+        cursor = await conn.execute(query, (start_date, end_date))
+        rows = await cursor.fetchall()
+        await conn.close()
 
         summary = {
             "period": {
@@ -1158,13 +1037,16 @@ def resource_summary() -> str:
         }
 
         for row in rows:
-            summary["categories"][row["category"]] = {
-                "total": row["total"],
-                "count": row["count"],
-                "average": round(row["total"] / row["count"], 2) if row["count"] > 0 else 0
+            cat = row[0] if isinstance(row, tuple) else row['category']
+            total = row[1] if isinstance(row, tuple) else row['total']
+            count = row[2] if isinstance(row, tuple) else row['count']
+            summary["categories"][cat] = {
+                "total": total,
+                "count": count,
+                "average": round(total / count, 2) if count > 0 else 0
             }
-            summary["overall"]["total_amount"] += row["total"]
-            summary["overall"]["total_expenses"] += row["count"]
+            summary["overall"]["total_amount"] += total
+            summary["overall"]["total_expenses"] += count
 
         return json.dumps(summary)
     except Exception as e:
@@ -1203,5 +1085,5 @@ If add_expense returns suggested_category/suggested_subcategory in the response 
 
 
 if __name__ == "__main__":
-    init_db()
-    mcp.run(transport="http", host="0.0.0.0", port=8000)
+    asyncio.run(init_db())
+    mcp.run()
