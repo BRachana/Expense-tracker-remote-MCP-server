@@ -25,13 +25,15 @@ logger = logging.getLogger(__name__)
 mcp = FastMCP(name="Expense Tracker")
 
 # Store database in the same folder as main.py
-SCRIPT_DIR = Path(__file__).parent
-# CATEGORIES_FILE = SCRIPT_DIR / "categories.json"
-# DB_PATH = SCRIPT_DIR / "expenses.db"
-DB_PATH = os.path.join(os.path.dirname(__file__),"expenses.db")
-CATEGORIES_FILE = os.path.join(os.path.dirname(__file__),"categories.json")
+SCRIPT_DIR = Path(__file__).resolve().parent
+DB_PATH = str(SCRIPT_DIR / "expenses.db")
+CATEGORIES_FILE = str(SCRIPT_DIR / "categories.json")
 EXPORTS_DIR = SCRIPT_DIR / "exports"
 RECENT_EXPENSES_LIMIT = 10
+
+logger.info(f"Script directory: {SCRIPT_DIR}")
+logger.info(f"Database path: {DB_PATH}")
+logger.info(f"Categories file: {CATEGORIES_FILE}")
 
 # Load categories
 def load_categories():
@@ -83,10 +85,15 @@ KEYWORD_MAPS = build_keyword_maps()
 
 def get_connection():
     """Get a database connection with row factory and WAL mode."""
-    conn = sqlite3.connect(str(DB_PATH), timeout=10.0)
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.row_factory = sqlite3.Row
-    return conn
+    try:
+        logger.debug(f"Connecting to database: {DB_PATH}")
+        conn = sqlite3.connect(str(DB_PATH), timeout=10.0)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.row_factory = sqlite3.Row
+        return conn
+    except Exception as e:
+        logger.error(f"Failed to connect to database at {DB_PATH}: {e}")
+        raise
 
 
 def _validate_category(category: str, subcategory: str = None) -> tuple[bool, dict, str | None]:
